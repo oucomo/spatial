@@ -1,0 +1,375 @@
+---
+title: "A spatial model"
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+  pdf_document:
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{css, echo=FALSE}
+pre, code {white-space:pre !important; overflow-x:auto}
+```
+
+```{r general options, include = FALSE}
+knitr::knit_hooks$set(
+  margin = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  prompt = function(before, options, envir) {
+    options(prompt = if (options$engine %in% c("sh", "bash")) "$ " else "> ")
+  })
+
+knitr::opts_chunk$set(margin = TRUE, message = FALSE, warning = FALSE,
+                      prompt = FALSE, comment = "##", collapse = FALSE,
+                      cache = FALSE, autodep = TRUE,
+                      dev.args = list(pointsize = 11), fig.height = 1.5 * 3.5,
+                      fig.width = 1.5 * 4.24725, fig.retina = 2, fig.align = "center")
+
+options(width = 263)
+
+l <- "en_US.UTF-8"
+Sys.setenv(LANGAGE = l)
+Sys.setlocale(locale = l)
+Sys.setlocale("LC_MESSAGES", l)
+```
+
+## Utilitary functions
+
+```{r}
+discretize <- function(cdf) {
+  diff(cdf / tail(cdf, 1))
+}
+```
+
+Let's try it:
+
+```{r}
+discretize(pweibull(0:11, 2.24, 5.42))
+```
+
+```{r}
+discretize_cond <- function(cdf) {
+  rescaled <- cdf / tail(cdf, 1)
+  diff(rescaled) / (1 - rescaled[-length(rescaled)])
+}
+```
+
+Let's try it:
+
+```{r}
+discretize_cond(pweibull(0:11, 2.24, 5.42))
+```
+
+## A minimal SIR Model
+
+```{r}
+dmax <- 11
+w <- discretize(pweibull(0:dmax, 2.24, 5.42))
+```
+
+```{r}
+lambda <- function(k, w, N) {
+  1 - exp(-k * w / N)
+}
+
+find_k <- function(k, w, N, R0) {
+  f <- function(x) abs(N * sum(sapply(w, lambda, k = x, N = N)) - R0)
+  optimize(f, k)$minimum
+}
+
+find_k(c(-5, 5), w, 9e7, 3)
+```
+
+figure:
+
+```{r}
+lwd <- 3
+opar <- par(pty = "s")
+col <- c("black", "#800026", "#bd0026", "#e31a1c", "#fc4e2a", "#fd8d3c", "#feb24c", "#fed976", "#ffeda0")
+xs <- seq(0, 1, le = 512)
+plot(xs, 1 - exp(-16 * xs), type = "l", xlim = 0:1, ylim = 0:1, asp = 1,
+     xlab = "proportion of infectious in the population",
+     ylab = "daily probability that a susceptible becomes infected",
+     xaxs = "i", yaxs = "i", lwd = lwd, col = col[1])
+abline(0, 1)
+lines(xs, 1 - exp(-8 * xs), lwd = lwd, col = col[2])
+lines(xs, 1 - exp(-4 * xs), lwd = lwd, col = col[3])
+lines(xs, 1 - exp(-2 * xs), lwd = lwd, col = col[4])
+lines(xs, 1 - exp(-1.5 * xs), lwd = lwd, col = "grey", lty = 2)
+lines(xs, 1 - exp(-1.2 * xs), lwd = lwd, col = "grey", lty = 3)
+lines(xs, 1 - exp(-1 * xs), lwd = lwd, col = col[5])
+lines(xs, 1 - exp(-.5* xs), lwd = lwd, col = col[6])
+lines(xs, 1 - exp(-.25 * xs), lwd = lwd, col = col[7])
+box(bty = "o")
+par(opar)
+```
+
+
+```{r}
+tmax <- 100
+R0 <- 2.5
+
+IO <- 100
+S0 <- 1e6
+
+S <- S0
+I <- matrix(0, tmax, dmax)
+R <- numeric(tmax)
+I[1, ] <- 1 / dmax
+
+for (i in 1:(tmax - 1)) {
+  I_tot <- w %*% I[i, ]
+  N <- I_tot + S + sum(R)
+  lambda <- 1 - exp(-R0 * I_tot / N)
+  new_cases <- S * lambda
+  S <- S - new_cases
+  I[i + 1, ] <- c(new_cases, I[i, -dmax])
+  R[i + 1] <- I[i, dmax]
+}
+
+R <- cumsum(R)
+
+plot(rowSums(I))
+```
+
+## Adding ICU
+
+IFR of symptomatics = 3%
+
+```{r}
+t_max <- 200 # duration of the simulation in days
+p_hos <- .001 # probability that an infection leads to a severe case
+R0 <- 2.5 
+lethality <- .5 # probability to die for people in ICU
+S0 <- 9.5e7
+I0 <- 10
+p <- .99
+n <- 1e5
+wbl_inf <- list(shape = 2.24, scale = 5.42) # Weibull parameters of serial int (from Nishiuria)
+wbl_hos1 <- list(shape = 2, scale = 10) # Weibull parameters of time in ICU
+wbl_hos <- list(shape = 1, scale = 5.5) # Weibull parameters of time in ICU
+wbl_hos3 <- list(shape = 1, scale = 6.139951) # Weibull parameters of time in ICU
+wbl_asp <- list(shape = 1.77, scale = 6.52) # Weibull parameters of incubation time (from Linton)
+wbl_inc <- list(shape = .766, scale = 2.9) # Weibull parameters of incubation time (from Linton)
+```
+
+Serial intervals distribution, discretized:
+
+```{r}
+d_inf <- ceiling(with(wbl_inf, qweibull(p, shape, scale)))
+w <- discretize(with(wbl_inf, pweibull(0:d_inf, shape, scale)))
+```
+
+Distribution of time in ICU:
+
+```{r}
+d_hos <- ceiling(with(wbl_hos, qweibull(p, shape, scale)))
+u <- discretize_cond(with(wbl_hos, pweibull(0:d_hos, shape, scale)))
+```
+
+Distribution of time from contamination to hospitalization:
+
+Monte Carlo:
+
+```{r}
+incub <- with(wbl_asp, rweibull(n, shape, scale))
+hospit <- with(wbl_inc, rweibull(n, shape, scale))
+iht <- incub + hospit
+wbl_sev <- as.list(fitdistrplus::fitdist(iht, dweibull)$estimate)
+```
+
+```{r}
+d_sev <- ceiling(with(wbl_sev, qweibull(p, shape, scale)))
+h <- discretize_cond(with(wbl_sev, pweibull(0:d_sev, shape, scale)))
+```
+
+Colors:
+
+```{r}
+colors <- c(`mild infections`   = "#4daf4a",
+            `severe infections` = "#377eb8",
+            `ICU`               = "#e41a1c",
+            `deaths`            = "#984ea3")
+colors <- c(`mild infections`   = "#377eb8", # = "#fecc5c",
+            `severe infections` = "#fd8d3c",
+            `ICU`               = "#e31a1c",
+            `deaths`            = "black")
+```
+
+Figure:
+
+```{r fig.height = 3.5, fig.width = 4.24725}
+lwd = 2
+xs <- seq(0, 1.5 * max(d_inf, d_hos, d_sev), le = 512)
+plot(xs, with(wbl_inf, dweibull(xs, shape, scale)), type = "l", lwd = lwd,
+     col = colors["mild infections"], xaxs = "i", yaxs = "i", ylim = c(0, .18),
+     xlab = "durations (days)", ylab = "density of probabilty")
+lines(xs, with(wbl_hos, dweibull(xs, shape, scale)), lwd = lwd, col = colors["ICU"])
+lines(xs, with(wbl_sev, dweibull(xs, shape, scale)), lwd = lwd, col = colors["severe infections"])
+legend("topright", legend = c("serial intervals", "from infection to hospitalization", "ICU"),
+       col = colors[! startsWith(names(colors), "d")], lwd = lwd, bty = "n")
+```
+
+```{r}
+S <- numeric(t_max)
+I <- matrix(0, t_max, d_inf)
+J <- matrix(0, t_max, d_sev)
+H <- matrix(0, t_max, d_hos)
+R <- numeric(t_max)
+D <- numeric(t_max)
+S[1] <- S0
+I[1, ] <- I0 / d_inf
+```
+
+```{r}
+for (t in 1:(t_max - 1)) {
+  
+  I_tot <- w %*% I[t, ]
+  N <- I_tot + S[t] + sum(R)
+  lambda <- 1 - exp(-R0 * I_tot / N)
+  lambda <- 1 - exp(-(1 * R0) * (I_tot / N))
+#  Lambda <- I_tot / (S0 / R0 + I_tot)
+  new_cases <- S[t] * lambda
+  leave_hospital <- u %*% H[t, ]
+  
+  S[t + 1] <- S[t] - new_cases
+  I[t + 1, ] <- c((1 - p_hos) * new_cases, I[t, -d_inf])
+  J[t + 1, ] <- c(p_hos * new_cases, (1 - h[-d_sev]) * J[t, -d_sev])
+  H[t + 1, ] <- c(h %*% J[t, ], (1 - u[-d_hos]) * H[t, -d_hos])
+  R[t + 1] <- I[t, d_inf] + (1 - lethality) * leave_hospital
+  D[t + 1] <- lethality * leave_hospital
+}
+```
+
+```{r}
+I <- rowSums(I)
+#I <- rowSums(t(t(I) * w))
+J <- rowSums(J)
+H <- rowSums(H)
+R <- cumsum(R)
+D <- cumsum(D)
+```
+
+```{r fig.height = 1 * 3.5,fig.width = 1 * 4.24725}
+lwd <- 2
+plot(I, lwd = lwd, col = colors["mild infections"], type = "l", ylim = c(0, 1e5),
+     xlab = "time (day)", ylab = "number of people")
+lines(J, lwd = lwd, col = colors["severe infections"])
+lines(H, lwd = lwd, col = colors["ICU"])
+lines(D, lwd = lwd, col = colors["deaths"])
+legend("topright", legend = names(colors), col = colors, bty = "n", lwd = 2)
+```
+
+```{r}
+tail(R, 1)
+tail(D, 1)
+```
+
+## Discriminating ICU from other hospitals
+
+```{r}
+t_max <- 200 # duration of the simulation in days
+p_hos <- .001 # probability that an infection leads to a severe case
+R0 <- 2.5 
+lethality <- .5 # probability to die for people in ICU
+S0 <- 9.5e7
+I0 <- 10
+p <- .99
+n <- 1e5
+wbl_inf <- list(shape = 2.24, scale = 5.42) # Weibull parameters of serial int (from Nishiuria)
+wbl_hos1 <- list(shape = 2, scale = 10) # Weibull parameters of time in ICU
+wbl_hos <- list(shape = 1, scale = 5.5) # Weibull parameters of time in ICU
+wbl_hos3 <- list(shape = 1, scale = 6.139951) # Weibull parameters of time in ICU
+wbl_asp <- list(shape = 1.77, scale = 6.52) # Weibull parameters of incubation time (from Linton)
+wbl_inc <- list(shape = .766, scale = 2.9) # Weibull parameters of incubation time (from Linton)
+```
+
+Serial intervals distribution, discretized:
+
+```{r}
+d_inf <- ceiling(with(wbl_inf, qweibull(p, shape, scale)))
+w <- discretize(with(wbl_inf, pweibull(0:d_inf, shape, scale)))
+```
+
+Distribution of time in ICU:
+
+```{r}
+d_hos <- ceiling(with(wbl_hos, qweibull(p, shape, scale)))
+u <- discretize_cond(with(wbl_hos, pweibull(0:d_hos, shape, scale)))
+```
+
+Distribution of time from contamination to hospitalization. Monte Carlo:
+
+```{r}
+incub <- with(wbl_asp, rweibull(n, shape, scale))
+hospit <- with(wbl_inc, rweibull(n, shape, scale))
+iht <- incub + hospit
+wbl_sev <- as.list(fitdistrplus::fitdist(iht, dweibull)$estimate)
+```
+
+The distribution:
+
+```{r}
+d_sev <- ceiling(with(wbl_sev, qweibull(p, shape, scale)))
+h <- discretize_cond(with(wbl_sev, pweibull(0:d_sev, shape, scale)))
+```
+
+```{r}
+S <- numeric(t_max)
+I <- matrix(0, t_max, d_inf)
+J <- matrix(0, t_max, d_sev)
+H <- matrix(0, t_max, d_hos)
+R <- numeric(t_max)
+D <- numeric(t_max)
+S[1] <- S0
+I[1, ] <- I0 / d_inf
+```
+
+```{r}
+for (t in 1:(t_max - 1)) {
+  
+  I_tot <- w %*% I[t, ]
+  N <- I_tot + S[t] + sum(R)
+  lambda <- 1 - exp(-R0 * I_tot / N)
+  lambda <- 1 - exp(-(1 * R0) * (I_tot / N))
+#  Lambda <- I_tot / (S0 / R0 + I_tot)
+  new_cases <- S[t] * lambda
+  leave_hospital <- u %*% H[t, ]
+  
+  S[t + 1] <- S[t] - new_cases
+  I[t + 1, ] <- c((1 - p_hos) * new_cases, I[t, -d_inf])
+  J[t + 1, ] <- c(p_hos * new_cases, (1 - h[-d_sev]) * J[t, -d_sev])
+  H[t + 1, ] <- c(h %*% J[t, ], (1 - u[-d_hos]) * H[t, -d_hos])
+  R[t + 1] <- I[t, d_inf] + (1 - lethality) * leave_hospital
+  D[t + 1] <- lethality * leave_hospital
+}
+```
+
+```{r}
+I <- rowSums(I)
+#I <- rowSums(t(t(I) * w))
+J <- rowSums(J)
+H <- rowSums(H)
+R <- cumsum(R)
+D <- cumsum(D)
+```
+
+```{r fig.height = 1 * 3.5,fig.width = 1 * 4.24725}
+lwd <- 2
+plot(I, lwd = lwd, col = colors["mild infections"], type = "l", ylim = c(0, 1e5),
+     xlab = "time (day)", ylab = "number of people")
+lines(J, lwd = lwd, col = colors["severe infections"])
+lines(H, lwd = lwd, col = colors["ICU"])
+lines(D, lwd = lwd, col = colors["deaths"])
+legend("topright", legend = names(colors), col = colors, bty = "n", lwd = 2)
+```
+
+```{r}
+tail(R, 1)
+tail(D, 1)
+```
